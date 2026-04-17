@@ -3,8 +3,8 @@ try:
     import aiofiles
     import aiohttp
 except ImportError:
-    print('[modules]\033[91m following modules are required!\033[0m => [ aiofiles , asyncio , aiohttp ]')
-    print('[hint]\033[91m to install them run the following\033[0m => \033[93mpip install aiofiles aiohttp asyncio\033[0m')
+    print('[ERR] Missing modules => aiofiles, aiohttp')
+    print('[HINT] pip install aiofiles aiohttp')
     exit(1)
 
 import argparse
@@ -16,6 +16,13 @@ from typing import Dict, List
 VALID_STATUS_CODES = {200, 204, 301, 302, 307, 403}
 discovered_paths: Dict[str, int] = {}
 
+# Colors
+GREEN = '\033[92m'
+YELLOW = '\033[93m'
+BLUE = '\033[94m'
+RED = '\033[91m'
+RESET = '\033[0m'
+
 
 # =========================
 # File Handling
@@ -26,7 +33,7 @@ async def load_wordlist(file_path: str) -> List[str]:
             content = await f.read()
             return [line.strip() for line in content.splitlines() if line.strip()]
     except FileNotFoundError:
-        print(f"[!] Wordlist not found: {file_path}")
+        print(f"{RED}[ERR]{RESET} Wordlist not found: {file_path}")
         exit(1)
 
 
@@ -47,9 +54,35 @@ async def fetch_path(
             async with session.get(url, timeout=timeout) as response:
                 if response.status in VALID_STATUS_CODES:
                     discovered_paths[url] = response.status
-                    print(f"[+] {response.status} -> {url}")
+                    color = GREEN if response.status == 200 else YELLOW
+                    print(f"{color}[{response.status}]{RESET} {url}")
         except asyncio.TimeoutError:
             pass
+        except aiohttp.ClientError:
+            pass
+
+
+async def detect_wildcard(url: str, session: aiohttp.ClientSession) -> None:
+    import string, random
+
+    print(f"{BLUE}[INFO]{RESET} Running wildcard detection (20 checks)")
+
+    BASELINE_SIZE = None
+
+    for _ in range(20):
+        random_text = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+        full_url = f"{url.rstrip('/')}/{random_text}"
+
+        try:
+            async with session.get(full_url) as resp:
+                text = await resp.text()
+
+                if resp.status in VALID_STATUS_CODES:
+                    if BASELINE_SIZE is None:
+                        BASELINE_SIZE = len(text)
+
+                    if len(text) == BASELINE_SIZE:
+                        print(f"{YELLOW}[WARN]{RESET} Wildcard likely: {full_url} [{resp.status}]")
         except aiohttp.ClientError:
             pass
 
@@ -65,14 +98,9 @@ def parse_args():
 
     parser.add_argument("url", help="Target base URL")
     parser.add_argument("-w", "--wordlist", required=True, help="Path to wordlist")
-    parser.add_argument("-t", "--timeout", type=float, default=1.0, help="Request timeout")
-    parser.add_argument(
-        "-c",
-        "--concurrency",
-        type=int,
-        default=100,
-        help="Max concurrent requests",
-    )
+    parser.add_argument("-t", "--timeout", type=float, default=1.0)
+    parser.add_argument("-c", "--concurrency", type=int, default=100)
+    parser.add_argument('--detect-WildCard', action='store_true')
 
     return parser.parse_args()
 
@@ -81,23 +109,26 @@ def parse_args():
 # UI Helpers
 # =========================
 def print_banner():
-    print("#" * 50)
-    print("# Directory Bruteforcer ")
-    print("#" * 50)
+    print("=" * 50)
+    print(" Async Directory Scanner ")
+    print("=" * 50)
 
 
 def print_summary():
-    GREEN = '\033[92m'
-    RESET_COLOR = '\033[0m'
-
     print("\n" + "=" * 50)
-    print(f"Finished. Found {len(discovered_paths)} valid paths.\n")
+    print(f"Finished. Found {len(discovered_paths)} paths.\n")
 
     for url, status in discovered_paths.items():
-        if status == 200:
-            print(f"[{GREEN}{status}{RESET_COLOR}] {url}")
-        else:
-            print(f"[{YELLOW}{status}{RESET_COLOR}] {url}")
+        color = GREEN if status == 200 else YELLOW
+        print(f"{color}[{status}]{RESET} {url}")
+
+
+def confirm():
+    while True:
+        choice = input("[?] Continue? (y/n): ").lower().strip()
+        if choice in ('y', 'n'):
+            return choice == 'y'
+        print("[!] Invalid input")
 
 
 # =========================
@@ -108,17 +139,26 @@ async def main():
     print_banner()
 
     words = await load_wordlist(args.wordlist)
-    print(f"[i] Loaded {len(words)} words")
+    print(f"{BLUE}[INFO]{RESET} Loaded {len(words)} words")
 
     semaphore = asyncio.Semaphore(args.concurrency)
 
     async with aiohttp.ClientSession() as session:
+        if args.detect_WildCard:
+            await detect_wildcard(args.url, session)
+
+        if not confirm():
+            print(f"{RED}[ERR]{RESET} Scan aborted")
+            exit(1)
+
+        print("-" * 50)
+        print(f"{BLUE}[INFO]{RESET} Starting scan...\n")
+
         tasks = [
             fetch_path(args.url, word, session, semaphore, args.timeout)
             for word in words
         ]
 
-        print("[i] Starting scan...\n")
         await asyncio.gather(*tasks)
 
     print_summary()
